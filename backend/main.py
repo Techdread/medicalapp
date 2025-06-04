@@ -1,4 +1,6 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, File, UploadFile, Form
+from PIL import Image
+import io
 from fastapi.middleware.cors import CORSMiddleware
 from . import models # Assuming models.py is in the same directory
 from . import services # Assuming services.py is in the same directory
@@ -27,11 +29,17 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup_event():
     print("Attempting to load MedGemma model on startup...")
-    services.load_medgemma_model() # Load the model when the application starts
+    services.load_medgemma_model() # Load the MedGemma model when the application starts
+    print("Attempting to load Caption model on startup...")
+    services.load_caption_model() # Load the Caption model
     if services.model is None or services.processor is None:
         print("MedGemma model could not be loaded on startup. The /api/explain-term endpoint might not function correctly.")
     else:
         print("MedGemma model loaded successfully on startup.")
+    if services.caption_model is None or services.caption_processor is None:
+        print("Caption model could not be loaded on startup. The /api/explain-image endpoint might not function correctly.")
+    else:
+        print("Caption model loaded successfully on startup.")
 
 @app.get("/", summary="Root endpoint", description="Provides a welcome message and API status.")
 async def read_root():
@@ -42,7 +50,30 @@ async def explain_term_endpoint(request: models.TermRequest):
     explanation = await services.get_medgemma_explanation(request.term)
     return models.ExplanationResponse(explanation=explanation)
 
+@app.post("/api/explain-image", response_model=models.ImageExplorationResponse, summary="Explain Medical Image and Answer Questions")
+async def explain_image_endpoint(image_file: UploadFile = File(...), question: str = Form(None)):
+    try:
+        image_bytes = await image_file.read()
+        pil_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    except Exception as e:
+        print(f"Error processing uploaded image: {e}")
+        return models.ImageExplorationResponse(
+            image_description="Error: Could not process the uploaded image.",
+            answer=None
+        )
+
+    image_description = await services.get_image_caption(pil_image)
+    
+    answer = None
+    if question and image_description and not image_description.startswith("Error:"):
+        answer = await services.get_medgemma_image_qa(image_description, question)
+    elif question and image_description.startswith("Error:"):
+        answer = "Error: Cannot answer question as image description failed."
+        
+    return models.ImageExplorationResponse(image_description=image_description, answer=answer)
+
 if __name__ == "__main__":
+
     import uvicorn
     # For development, run directly. For production, use a process manager like Gunicorn with Uvicorn workers.
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True) # Added reload=True for development

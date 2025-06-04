@@ -16,7 +16,8 @@ torch.backends.cudnn.benchmark = True  # Auto-tuner for better performance
 os.environ["PYTORCH_JIT"] = "0"
 os.environ["TORCH_INDUCTOR_DISABLE"] = "1"
 
-from transformers import AutoModelForImageTextToText, AutoProcessor # Import both required classes
+from transformers import AutoModelForImageTextToText, AutoProcessor, AutoModelForVision2Seq, BlipForConditionalGeneration, BlipProcessor
+from PIL import Image
 from dotenv import load_dotenv
 import traceback
 
@@ -24,6 +25,7 @@ load_dotenv() # Load environment variables from .env file
 
 # --- Model Loading Configuration ---
 MODEL_ID = os.getenv("MODEL_ID", "google/medgemma-4b-it")
+CAPTION_MODEL_ID = "Salesforce/blip-image-captioning-large"
 
 # Print CUDA diagnostic information at module import time
 print("\n==== CUDA Diagnostic Information ====")
@@ -38,6 +40,9 @@ print("====================================\n")
 
 model = None
 processor = None
+
+caption_model = None
+caption_processor = None
 
 def load_medgemma_model():
     global model, processor, MODEL_ID
@@ -103,6 +108,45 @@ def load_medgemma_model():
         model = None
         processor = None
 
+def load_caption_model():
+    global caption_model, caption_processor, CAPTION_MODEL_ID
+    if caption_model is not None and caption_processor is not None:
+        print(f"Caption model ({CAPTION_MODEL_ID}) is already loaded on {caption_model.device if hasattr(caption_model, 'device') else 'N/A'}")
+        return
+
+    cuda_available = torch.cuda.is_available()
+    local_device = "cuda" if cuda_available else "cpu"
+    local_torch_dtype = torch.float16 if local_device == "cuda" else torch.float32
+
+    print(f"Attempting to load Caption model ({CAPTION_MODEL_ID}) onto {local_device} with dtype {local_torch_dtype}...")
+    try:
+        if cuda_available:
+            # For BLIP, device_map="auto" or specific GPU is usually fine.
+            # Let's try to put it on the same device as MedGemma if possible, or cuda:0
+            target_device = model.device if model and str(model.device).startswith('cuda') else "cuda:0"
+            print(f"Loading caption model to {target_device}")
+            caption_model = BlipForConditionalGeneration.from_pretrained(
+                CAPTION_MODEL_ID,
+                torch_dtype=local_torch_dtype
+            ).to(target_device)
+        else:
+            caption_model = BlipForConditionalGeneration.from_pretrained(
+                CAPTION_MODEL_ID,
+                torch_dtype=local_torch_dtype
+            )
+        
+        caption_processor = BlipProcessor.from_pretrained(CAPTION_MODEL_ID)
+        
+        # Check device for caption_model
+        final_device = caption_model.device if hasattr(caption_model, 'device') else 'N/A (CPU or error)'
+        print(f"Caption model ({CAPTION_MODEL_ID}) loaded successfully. Model is on: {final_device}")
+
+    except Exception as e:
+        print(f"ERROR: Failed to load Caption model ({CAPTION_MODEL_ID}). Exception: {e}")
+        traceback.print_exc()
+        caption_model = None
+        caption_processor = None
+
 async def get_medgemma_explanation(term: str) -> str:
     global model, processor
     if model is None or processor is None:
@@ -158,5 +202,86 @@ async def get_medgemma_explanation(term: str) -> str:
         traceback.print_exc()
         return "Error: Could not generate explanation due to an internal issue. Please check backend logs."
 
+async def get_image_caption(image_pil: Image.Image) -> str:
+    global caption_model, caption_processor
+    if caption_model is None or caption_processor is None:
+        print("Caption model or processor not loaded. Attempting to load now...")
+        load_caption_model()
+    
+    if caption_model is None or caption_processor is None:
+        error_message = "Error: Image captioning model is not available or failed to load. Please check backend logs."
+        print(error_message)
+        return error_message
+
+    try:
+        print(f"Generating caption for image with model on {caption_model.device if hasattr(caption_model, 'device') else 'N/A'}")
+        # Prepare image
+        inputs = caption_processor(images=image_pil, return_tensors="pt").to(caption_model.device if hasattr(caption_model, 'device') else 'cpu', caption_model.dtype if hasattr(caption_model, 'dtype') else torch.float32)
+        
+        with torch.no_grad():
+            generated_ids = caption_model.generate(**inputs, max_new_tokens=75, do_sample=False)
+        
+        caption = caption_processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
+        print(f"Generated caption: {caption[:100]}...")
+        return caption
+    except Exception as e:
+        print(f"ERROR: Could not generate caption for image. Exception: {e}")
+        traceback.print_exc()
+        return "Error: Could not generate image caption due to an internal issue. Please check backend logs."
+
+async def get_medgemma_image_qa(image_description: str, question: str) -> str:
+    global model, processor # MedGemma model and processor
+    if model is None or processor is None:
+        print("MedGemma model or processor not loaded. Attempting to load now...")
+        load_medgemma_model()
+    
+    if model is None or processor is None:
+        error_message = "Error: MedGemma model is not available or failed to load. Please check backend logs."
+        print(error_message)
+        return error_message
+
+    messages = [
+        {
+            "role": "system",
+            "content": [{"type": "text", "text": "You are a medical expert. Based on the following description of a medical image, answer the user's question. Provide a clear and concise answer suitable for a medical student."}]
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": f"Image Description: {image_description}\n\nQuestion: {question}"},
+            ]
+        }
+    ]
+
+    try:
+        print(f"Processing image Q&A: '{question}' with MedGemma model on {model.device}")
+        inputs = processor.apply_chat_template(
+            messages, 
+            add_generation_prompt=True, 
+            tokenize=True,
+            return_dict=True, 
+            return_tensors="pt"
+        ).to(model.device)
+        
+        input_len = inputs["input_ids"].shape[-1]
+
+        with torch.no_grad():
+            generation = model.generate(
+                **inputs, 
+                max_new_tokens=300, 
+                do_sample=False,
+                use_cache=True,
+            )
+            generation = generation[0][input_len:]
+        
+        decoded_answer = processor.decode(generation, skip_special_tokens=True)
+        print(f"Generated answer for image question '{question}': {decoded_answer[:100]}...")
+        return decoded_answer.strip()
+    
+    except Exception as e:
+        print(f"ERROR: Could not generate answer for image question '{question}'. Exception: {e}")
+        traceback.print_exc()
+        return "Error: Could not generate answer for image question due to an internal issue. Please check backend logs."
+
 # Note: Model loading is now triggered by an app startup event in main.py
-# or on the first call to get_medgemma_explanation if startup failed.
+# or on the first call to service functions if startup failed.

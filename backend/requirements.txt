@@ -13,5 +13,8 @@ sentencepiece>=0.1.99
 # For multimodal models, Pillow might be needed by the processor
 Pillow>=9.0.0
 
+# For FastAPI file uploads (form data)
+python-multipart>=0.0.7
+
 # For bfloat16 support check
 # No specific package, torch.cuda.is_bf16_supported() is built-in if compiled with CUDA >= 11

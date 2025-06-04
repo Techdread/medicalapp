@@ -21,6 +21,15 @@ export default function HomePage() {
               Go to Terminology Explainer
             </Button>
           </Link>
+          <Link href="/explore-image" legacyBehavior passHref>
+            <Button 
+              size="lg"
+              variant="outline"
+              className="px-8 py-4 text-lg border-sky-500 text-sky-400 hover:bg-sky-500/10 hover:text-sky-300 active:bg-sky-500/20 transition-colors duration-150 shadow-lg hover:shadow-sky-500/30"
+            >
+              Explore Medical Images
+            </Button>
+          </Link>
         </div>
       </div>
       <footer className="absolute bottom-8 text-center w-full text-slate-500 text-sm">
