@@ -1,0 +1,17 @@
+fastapi>=0.100.0
+uvicorn[standard]>=0.20.0
+python-dotenv>=1.0.0
+
+# For MedGemma model interaction
+torch>=2.0.0
+transformers>=4.38.0 # Using a slightly more recent version, ensure compatibility
+accelerate>=0.25.0 # For efficient model loading and inference
+
+# sentencepiece is often a dependency for Hugging Face tokenizers
+sentencepiece>=0.1.99
+
+# For multimodal models, Pillow might be needed by the processor
+Pillow>=9.0.0
+
+# For bfloat16 support check
+# No specific package, torch.cuda.is_bf16_supported() is built-in if compiled with CUDA >= 11
